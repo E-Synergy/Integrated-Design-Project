@@ -1,0 +1,32 @@
+from sklearn.neighbors import KNeighborsClassifier
+
+knn = KNeighborsClassfier(n_neighbors=5, distance = eucledian, abc)
+
+#Train Test Split (sklearn.traintestsplit or k-fold cross validation)
+x_train_scaled
+x_test_scaled
+
+y_train
+y_test
+
+validation
+
+#Training Model
+knn.fit(x_train_scaled, y_train)
+
+#Testing Model
+y_pred = knn.predict(x_test_scaled)
+
+from sklearn.metrics import accuracyscore
+acc = accuracyscore(y_pred,y_test)
+
+import pickle
+pickle.dump("abc.pt"
+
+
+Genetic Algorithm:
+[5, manhattan, xyz]
+
+fitness function = accuracy, f1score, roc
+
+
