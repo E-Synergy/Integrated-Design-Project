@@ -43,7 +43,7 @@ void setup() {
 
 void loop() {
   sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
+  mpu.getEvent(&a, &g, &temp);    //populates the struct sensors_event_t declared with the latest measurements
 
   Serial.print("Acceleration X: ");
   Serial.print(a.acceleration.x);
