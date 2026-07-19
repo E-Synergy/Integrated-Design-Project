@@ -1,3 +1,6 @@
 #requirements.in
 pyserial
-csv
+pandas
+matplotlib
+scikit-learn
+tensorflow
