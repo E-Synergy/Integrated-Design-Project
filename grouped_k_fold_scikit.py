@@ -1,16 +1,21 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import f1_score, roc_auc_score
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
 
-# --- 1. FEATURE EXTRACTION PIPELINE ---
-def slice_and_extract_features(file_path, window_samples=100, stride_samples=20):
-    df = pd.read_csv(file_path)
-    
-    # Target signals for physics extraction
+# --- 1. TARGETED FEATURE EXTRACTION PER FILE TYPE ---
+def extract_features_from_file(file_path, assigned_label, window_samples=100, stride_samples=20):
+    try:
+        df = pd.read_csv(file_path)
+    except FileNotFoundError:
+        print(f"Error: The file '{file_path}' was not found. Please verify the filename.")
+        return np.empty((0, 6)), np.empty((0,))
+
+    # Target spatial and physics channels
     features = ["Axial_x", "Axial_y", "Axial_z", "Acc_Magnitude", "Jerk_Magnitude"]
     for col in features:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -18,111 +23,102 @@ def slice_and_extract_features(file_path, window_samples=100, stride_samples=20)
     
     windows_features = []
     labels = []
-    file_groups = []
-    
-    # Defensive thresholding indicator (40% of max historical jerk)
-    jerk_threshold = float(df["Jerk_Magnitude"].max()) * 0.4 
     
     idx = 0
-    group_counter = 0
-    
     while idx <= len(df) - window_samples:
         window_df = df.iloc[idx : idx + window_samples]
         
-        # --- PHYSICS FEATURE EXTRACTION ---
-        # 1. Peak impact force
+        # --- CALCULATE PHYSICAL SUMMARY ATTRIBUTES ---
         max_acc = window_df["Acc_Magnitude"].max()
-        # 2. Weightlessness/Free-fall dip right before impact
         min_acc = window_df["Acc_Magnitude"].min()
-        # 3. Overall variance of movement intensity
         std_acc = window_df["Acc_Magnitude"].std()
-        # 4. Maximum rate of change of acceleration (sudden jolt)
         max_jerk = window_df["Jerk_Magnitude"].max()
-        # 5. Post-fall immobility indicator (variance of the last 500ms of the window)
+        
+        # Stillness factor: standard deviation of the tail end of the window (~500ms)
         stillness_std = window_df["Acc_Magnitude"].iloc[-25:].std() 
-        # 6. Peak orientation displacement (tilt variation on the primary vertical axis)
+        
+        # Angular displacement estimation across primary movement axis
         max_y_tilt = window_df["Axial_y"].max() - window_df["Axial_y"].min()
         
-        # Bundle into a simple 1D array of 6 elements
+        # Bundle into a flat 6-element list
         feature_vector = [max_acc, min_acc, std_acc, max_jerk, stillness_std, max_y_tilt]
         windows_features.append(feature_vector)
         
-        # --- GROUND TRUTH LABELING ---
-        has_impact = max_jerk > jerk_threshold
-        if has_impact:
-            labels.append(1)
-        else:
-            labels.append(0)
+        # Enforce clean, uncorrupted ground truth based on file source
+        labels.append(assigned_label)
             
-        file_groups.append(group_counter)
         idx += stride_samples
-        
-        # Group window slices in blocks of 5 to protect cross-validation from overlap leakage
-        if len(windows_features) % 5 == 0:
-            group_counter += 1
             
-    return np.array(windows_features), np.array(labels), np.array(file_groups)
+    return np.array(windows_features), np.array(labels)
 
-# Load and transform raw data into standard tabular metrics
-csv_file_path = "data.csv"
-X, y, groups = slice_and_extract_features(csv_file_path)
+# --- 2. COMPILE EXPLICIT DATASET GROUPS ---
+# Replace these strings with the exact names of your recorded dataset files
+normal_file = "walking_normal.csv"
+fall_file = "fall_events.csv"
 
-# --- 2. BACK-TO-BASICS CROSS-VALIDATION ---
-if len(X) > 0:
-    print(f"Dataset compiled successfully. Shape: {X.shape} (Windows, Features)")
+X_normal, y_normal = extract_features_from_file(normal_file, assigned_label=0)
+X_falls, y_falls = extract_features_from_file(fall_file, assigned_label=1)
+
+# Ensure both files successfully generated data blocks before combining
+if len(X_normal) > 0 and len(X_falls) > 0:
+    X = np.vstack([X_normal, X_falls])
+    y = np.concatenate([y_normal, y_falls])
     
-    n_splits = min(5, len(np.unique(groups)))
-    gkf = GroupKFold(n_splits=n_splits)
+    print(f"\nDataset fully compiled.")
+    print(f"-> Normal Windows (Class 0): {X_normal.shape[0]}")
+    print(f"-> Fall Windows   (Class 1): {X_falls.shape[0]}")
+    print(f"-> Total Shape: {X.shape}\n")
+
+    # --- 3. STABLE STRATIFIED CROSS-VALIDATION ---
+    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=24)
     
     fold_f1_scores = []
     fold_auc_scores = []
 
-    for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups=groups)):
-        # Pure 2D arrays: X_train shape is now exactly (Num_Windows, 6)
-        X_train, X_val = X[train_idx], X[val_idx]
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+        X_train_raw, X_val_raw = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
         
-        if len(np.unique(y_train)) < 2:
-            print(f"\nSkipping Fold {fold + 1}: Split lacks class diversity.")
-            continue
-            
-        # --- 3. EXTREMELY LIGHTWEIGHT MLP ARCHITECTURE ---
-        # No Flatten layer needed. The inputs are already flat vectors.
+        # --- 4. CLEAN 2D INDEPENDENT SCALING ---
+        # Bounding inputs keeps network nodes responsive and prevents saturation errors
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train_raw)
+        X_val = scaler.transform(X_val_raw)
+        
+        # --- 5. STREAMLINED KERAS INFRASTRUCTURE ---
         model = Sequential([
             tf.keras.layers.Input(shape=(6,)), 
-            Dense(16, activation="relu"),
+            Dense(12, activation="relu"),
             Dropout(0.1),
-            Dense(8, activation="relu"),
+            Dense(6, activation="relu"),
             Dense(1, activation="sigmoid")
         ])
         
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.002), 
+        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.003), 
                       loss='binary_crossentropy', 
                       metrics=['accuracy'])
         
-        print(f"\n================ TRAINING FOLD {fold + 1} ================")
-        model.fit(X_train, y_train, epochs=50, batch_size=16, verbose=0, class_weight={0: 1.0, 1: 1.5})
+        print(f"================ TRAINING FOLD {fold + 1} ================")
+        model.fit(X_train, y_train, epochs=60, batch_size=16, verbose=0, class_weight={0: 1.0, 1: 1.5})
 
-        # --- 4. EVALUATION ---
+        # --- 6. METRICS & CONFIDENCE OUTPUT EVALUATION ---
         y_pred_probs = model.predict(X_val, verbose=0).flatten()
         y_pred_labels = (y_pred_probs >= 0.5).astype(int)
         
         for true_label, pred_prob in zip(y_val, y_pred_probs):
             print(f"True Label: {true_label} | Model Confidence: {pred_prob:.4f}")
 
-        if len(np.unique(y_val)) < 2:
-            f1, auc = 0.0, np.nan
-        else:
-            f1 = f1_score(y_val, y_pred_labels, zero_division=0)
-            auc = roc_auc_score(y_val, y_pred_probs)
-            print(f"Validation F1-Score : {f1:.4f}")
-            print(f"Validation ROC-AUC  : {auc:.4f}")
+        f1 = f1_score(y_val, y_pred_labels, zero_division=0)
+        auc = roc_auc_score(y_val, y_pred_probs)
+        print(f"Validation F1-Score : {f1:.4f}")
+        print(f"Validation ROC-AUC  : {auc:.4f}\n")
         
         fold_f1_scores.append(f1)
         fold_auc_scores.append(auc)
 
-    print("\n================ FINAL EVALUATION SUMMARY ================")
+    print("================ FINAL EVALUATION SUMMARY ================")
     print(f"Mean CV F1-Score: {np.nanmean(fold_f1_scores):.4f}")
     print(f"Mean CV ROC-AUC : {np.nanmean(fold_auc_scores):.4f}")
+    
 else:
-    print("Error: Empty dataset generated. Please check feature mapping headers.")
+    print("\nExecution stopped: Ensure both CSV data files exist and contain valid raw readings.")
