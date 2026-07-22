@@ -102,7 +102,7 @@ def write(ser, file):
 
     try:
         count = 0
-        max_data_points = 500
+        max_data_points = 2000
         while True and count < max_data_points:
             is_successful = process_sensor_data(ser, writer, file, count)
             if(is_successful):

@@ -92,12 +92,12 @@ void jerk_calculation() {
     Serial.print(currentAcc[1]);   Serial.print(","); // Y-axis mg
     Serial.print(currentAcc[2]);   Serial.print(","); // Z-axis mg
     Serial.print(accMagnitude);    Serial.print(","); // Total Acceleration Magnitude
-    Serial.println(jerkMagnitude);                    // True Resultant Jerk Magnitude
+    Serial.print(jerkMagnitude);   Serial.print(",");  // True Resultant Jerk Magnitude
     
     // Optional directional jerk output lines if your model requires them:
-    // Serial.print(axialJerk[0]); Serial.print(",");
-    // Serial.print(axialJerk[1]); Serial.print(",");
-    // Serial.println(axialJerk[2]);
+    Serial.print(axialJerk[0]); Serial.print(",");
+    Serial.print(axialJerk[1]); Serial.print(",");
+    Serial.println(axialJerk[2]);
 
     // 7. Advance array states to historical registers for the next step iteration
     shift_memory(prevAcc, currentAcc);
