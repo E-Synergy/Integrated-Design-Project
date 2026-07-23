@@ -86,10 +86,43 @@ def plot_oof_roc_curve(y_true, y_probs, target_recall, figsize):
 
     return rec_thresh, computed_auc
 
+def header_file(scaler):
+        # Assuming 'scaler' is the StandardScaler fitted on your training data
+    means = scaler.mean_
+    scales = scaler.scale_  # scaler.scale_ is the Standard Deviation (sqrt of variance)
+
+    print("\n" + "="*50)
+    print("ESP32 C++ SCALER PARAMETERS")
+    print("="*50)
+    print(f"const float SCALER_MEAN[6]  = {{{', '.join([f'{m:.6f}f' for m in means])}}};")
+    print(f"const float SCALER_SCALE[6] = {{{', '.join([f'{s:.6f}f' for s in scales])}}};")
+    print("="*50 + "\n")
+
+    # Automatically generate a C++ header file
+    header_content = f"""
+    ifndef SCALER_PARAMS_H
+    #define SCALER_PARAMS_H
+
+    // Auto-generated StandardScaler parameters from Python
+    // Input order: [max_acc, min_acc, std_acc, max_jerk, stillness_std, max_y_tilt]
+
+    const float SCALER_MEAN[6]  = {{{', '.join([f'{m:.6f}f' for m in means])}}};
+    const float SCALER_SCALE[6] = {{{', '.join([f'{s:.6f}f' for s in scales])}}};
+
+    #endif // SCALER_PARAMS_H
+    """
+
+    with open("scaler_params.h", "w") as f:
+        f.write(header_content)
+
+    print("Saved 'scaler_params.h' for ESP32 project.")
+
+
 # --- 2. COMPILE EXPLICIT DATASET GROUPS ---
 normal_file = "walking_normal.csv"
 fall_file = "fall_events.csv"
 
+target_threshold = 0.48
 oof_y_true = []
 oof_y_probs = []
 
@@ -140,7 +173,7 @@ if len(X_normal) > 0 and len(X_falls) > 0:
 
         # --- 6. METRICS & CONFIDENCE OUTPUT EVALUATION ---
         y_pred_probs = model.predict(X_val, verbose=0).flatten()
-        y_pred_labels = (y_pred_probs >= 0.5).astype(int)
+        y_pred_labels = (y_pred_probs >= target_threshold).astype(int)
         
         for true_label, pred_prob in zip(y_val, y_pred_probs):
             print(f"True Label: {true_label} | Model Confidence: {pred_prob:.4f}")
@@ -149,6 +182,13 @@ if len(X_normal) > 0 and len(X_falls) > 0:
         auc = roc_auc_score(y_val, y_pred_probs)
         print(f"Validation F1-Score : {f1:.4f}")
         print(f"Validation ROC-AUC  : {auc:.4f}\n")
+
+        if auc > best_auc:
+            best_auc = auc
+            means = scaler.mean_
+            scales = scaler.scale_
+            model.save("best_fall_detector.h5")
+            print(f"--> Saved new best model from Fold {fold + 1} (AUC: {best_auc:.4f})")
         
         oof_y_true.extend(y_val)
         oof_y_probs.extend(y_pred_probs)
