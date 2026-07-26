@@ -86,8 +86,9 @@ def plot_oof_roc_curve(y_true, y_probs, target_recall, figsize):
 
     return rec_thresh, computed_auc
 
-def header_file(scaler):
-        # Assuming 'scaler' is the StandardScaler fitted on your training data
+def header_file(model, scaler):
+    save_name = "best_fall_detector"
+    # Assuming 'scaler' is the StandardScaler fitted on your training data
     means = scaler.mean_
     scales = scaler.scale_  # scaler.scale_ is the Standard Deviation (sqrt of variance)
 
@@ -117,6 +118,8 @@ def header_file(scaler):
 
     print("Saved 'scaler_params.h' for ESP32 project.")
 
+    model.save(f"{save_name}.h5")
+
 
 # --- 2. COMPILE EXPLICIT DATASET GROUPS ---
 normal_file = "walking_normal.csv"
@@ -144,6 +147,7 @@ if len(X_normal) > 0 and len(X_falls) > 0:
     
     fold_f1_scores = []
     fold_auc_scores = []
+    best_auc = 0.0
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
         X_train_raw, X_val_raw = X[train_idx], X[val_idx]
@@ -185,8 +189,7 @@ if len(X_normal) > 0 and len(X_falls) > 0:
 
         if auc > best_auc:
             best_auc = auc
-            means = scaler.mean_
-            scales = scaler.scale_
+            header_file(model=model, scaler=scaler)  # Save scaler parameters for ESP32
             model.save("best_fall_detector.h5")
             print(f"--> Saved new best model from Fold {fold + 1} (AUC: {best_auc:.4f})")
         
