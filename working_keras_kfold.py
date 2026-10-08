@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import sklearn.metrics as metrics
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
+from sklearn.utils.class_weight import compute_class_weight
 
 # --- 1. TARGETED FEATURE EXTRACTION PER FILE TYPE ---
 def extract_features_from_file(file_path, assigned_label, window_samples=100, stride_samples=20):
@@ -101,8 +102,8 @@ def header_file(model, scaler):
 
     # Automatically generate a C++ header file
     header_content = f"""
-    ifndef SCALER_PARAMS_H
-    #define SCALER_PARAMS_H
+#ifndef SCALER_PARAMS_H
+#define SCALER_PARAMS_H
 
     // Auto-generated StandardScaler parameters from Python
     // Input order: [max_acc, min_acc, std_acc, max_jerk, stillness_std, max_y_tilt]
@@ -110,7 +111,7 @@ def header_file(model, scaler):
     const float SCALER_MEAN[6]  = {{{', '.join([f'{m:.6f}f' for m in means])}}};
     const float SCALER_SCALE[6] = {{{', '.join([f'{s:.6f}f' for s in scales])}}};
 
-    #endif // SCALER_PARAMS_H
+#endif // SCALER_PARAMS_H
     """
 
     with open("scaler_params.h", "w") as f:
@@ -124,22 +125,24 @@ def header_file(model, scaler):
 # --- 2. COMPILE EXPLICIT DATASET GROUPS ---
 normal_file = "walking_normal.csv"
 fall_file = "fall_events.csv"
+stillness_file = "stillness.csv"
 
-target_threshold = 0.48
 oof_y_true = []
 oof_y_probs = []
 
 X_normal, y_normal = extract_features_from_file(normal_file, assigned_label=0)
 X_falls, y_falls = extract_features_from_file(fall_file, assigned_label=1)
+X_still, y_still = extract_features_from_file(stillness_file, assigned_label=2)
 
 # Ensure both files successfully generated data blocks before combining
-if len(X_normal) > 0 and len(X_falls) > 0:
-    X = np.vstack([X_normal, X_falls])
-    y = np.concatenate([y_normal, y_falls])
+if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
+    X = np.vstack([X_normal, X_falls, X_still])
+    y = np.concatenate([y_normal, y_falls, y_still])
     
     print(f"\nDataset fully compiled.")
     print(f"-> Normal Windows (Class 0): {X_normal.shape[0]}")
     print(f"-> Fall Windows   (Class 1): {X_falls.shape[0]}")
+    print(f"-> Still Windows   (Class 2): {X_still.shape[0]}")
     print(f"-> Total Shape: {X.shape}\n")
 
     # --- 3. STABLE STRATIFIED CROSS-VALIDATION ---
@@ -165,36 +168,44 @@ if len(X_normal) > 0 and len(X_falls) > 0:
             Dense(8, activation="relu"),
             Dropout(0.2),
             Dense(4, activation="relu"),
-            Dense(1, activation="sigmoid")
+            Dense(3, activation="softmax")
         ])
         
         model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.003), 
-                      loss='binary_crossentropy', 
+                      loss='sparse_categorical_crossentropy', 
                       metrics=['accuracy'])
-        
+
+        classes = np.unique(y_train)
+        computed_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=classes,
+            y=y_train
+        )
+        class_weight_dict = dict(zip(classes, computed_weights))
+
         print(f"================ TRAINING FOLD {fold + 1} ================")
-        model.fit(X_train, y_train, epochs=60, batch_size=16, verbose=0, class_weight={0: 1.0, 1: 1.5})
+        print(f"Computed Class Weights: {class_weight_dict}")
+        model.fit(X_train, y_train, epochs=60, batch_size=16, verbose=0, class_weight=class_weight_dict)
 
         # --- 6. METRICS & CONFIDENCE OUTPUT EVALUATION ---
-        y_pred_probs = model.predict(X_val, verbose=0).flatten()
-        y_pred_labels = (y_pred_probs >= target_threshold).astype(int)
+        y_pred_probs = model.predict(X_val, verbose=0)
+        y_pred_labels = np.argmax(y_pred_probs, axis=1) # Predicted class index (0, 1, or 2)
         
         for true_label, pred_prob in zip(y_val, y_pred_probs):
-            print(f"True Label: {true_label} | Model Confidence: {pred_prob:.4f}")
+            print(f"True: {true_label} | Probs [Normal, Fall, Still]: [{pred_prob[0]:.2f}, {pred_prob[1]:.2f}, {pred_prob[2]:.2f}]")
 
-        f1 = f1_score(y_val, y_pred_labels, zero_division=0)
-        auc = roc_auc_score(y_val, y_pred_probs)
+        f1 = f1_score(y_val, y_pred_labels, zero_division=0, average='macro')
+        auc = roc_auc_score(y_val, y_pred_probs, multi_class='ovr')
         print(f"Validation F1-Score : {f1:.4f}")
         print(f"Validation ROC-AUC  : {auc:.4f}\n")
 
         if auc > best_auc:
             best_auc = auc
             header_file(model=model, scaler=scaler)  # Save scaler parameters for ESP32
-            model.save("best_fall_detector.h5")
             print(f"--> Saved new best model from Fold {fold + 1} (AUC: {best_auc:.4f})")
         
         oof_y_true.extend(y_val)
-        oof_y_probs.extend(y_pred_probs)
+        oof_y_probs.append(y_pred_probs)
         fold_f1_scores.append(f1)
         fold_auc_scores.append(auc)
 
@@ -202,9 +213,15 @@ if len(X_normal) > 0 and len(X_falls) > 0:
     print(f"Mean CV F1-Score: {np.nanmean(fold_f1_scores):.4f}")
     print(f"Mean CV ROC-AUC : {np.nanmean(fold_auc_scores):.4f}")
 
-    rec_threshold, _ = plot_oof_roc_curve(oof_y_true, oof_y_probs, target_recall= 0.95, figsize = (13, 7))
+    oof_y_true = np.array(oof_y_true)
+    oof_y_probs = np.vstack(oof_y_probs)
 
-    print(f"Recommended ESP32 Threshold: {rec_threshold:.4f}")
+    # Plot ROC specifically for Class 1 (Fall Events) vs rest
+    fall_true_binary = (oof_y_true == 1).astype(int)
+    fall_probs = oof_y_probs[:, 1]
+    rec_threshold, _ = plot_oof_roc_curve(fall_true_binary, fall_probs, target_recall=0.95, figsize=(13, 7))
+
+    print(f"Recommended ESP32 Fall Trigger Threshold: {rec_threshold:.4f}")
 
 else:
     print("\nExecution stopped: Ensure both CSV data files exist and contain valid raw readings.")
