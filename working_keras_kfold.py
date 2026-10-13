@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 import sklearn.metrics as metrics
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
+import os
+import glob
 from sklearn.utils.class_weight import compute_class_weight
 
 # --- 1. TARGETED FEATURE EXTRACTION PER FILE TYPE ---
@@ -54,6 +56,27 @@ def extract_features_from_file(file_path, assigned_label, window_samples=100, st
             
     return np.array(windows_features), np.array(labels)
 
+def extract_from_folder(folder_path, assigned_label):
+    file_list = sorted(glob.glob(os.path.join(folder_path, "*.csv")))
+    if not file_list:
+        print(f"Warning: No .csv files found in '{folder_path}'")
+        return np.empty((0, 6)), np.empty((0,))
+
+    print(f"Loading Class {assigned_label} from '{folder_path}' ({len(file_list)} files found)...")
+    
+    X_list, y_list = [], []
+    for f in file_list:
+        X_sub, y_sub = extract_features_from_file(f, assigned_label=assigned_label)
+        if len(X_sub) > 0:
+            X_list.append(X_sub)
+            y_list.append(y_sub)
+            
+    if not X_list:
+        return np.empty((0, 6)), np.empty((0,))
+        
+    return np.vstack(X_list), np.concatenate(y_list)
+
+    
 #OOF is equivalent to out-of-fold
 def plot_oof_roc_curve(y_true, y_probs, target_recall, figsize):
     y_true = np.array(y_true)
@@ -123,16 +146,16 @@ def header_file(model, scaler):
 
 
 # --- 2. COMPILE EXPLICIT DATASET GROUPS ---
-normal_file = "walking_normal.csv"
-fall_file = "fall_events.csv"
-stillness_file = "stillness.csv"
+normal_dir    = "dataset/0_normal"
+fall_dir      = "dataset/1_fall"
+stillness_dir = "dataset/2_stillness"
 
 oof_y_true = []
 oof_y_probs = []
 
-X_normal, y_normal = extract_features_from_file(normal_file, assigned_label=0)
-X_falls, y_falls = extract_features_from_file(fall_file, assigned_label=1)
-X_still, y_still = extract_features_from_file(stillness_file, assigned_label=2)
+X_normal, y_normal = extract_from_folder(normal_dir,    assigned_label=0)
+X_falls,  y_falls  = extract_from_folder(fall_dir,      assigned_label=1)
+X_still,  y_still  = extract_from_folder(stillness_dir, assigned_label=2)
 
 # Ensure both files successfully generated data blocks before combining
 if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
@@ -224,4 +247,4 @@ if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
     print(f"Recommended ESP32 Fall Trigger Threshold: {rec_threshold:.4f}")
 
 else:
-    print("\nExecution stopped: Ensure both CSV data files exist and contain valid raw readings.")
+    print("\nExecution stopped: Ensure all three class folders contain valid CSV data.")
