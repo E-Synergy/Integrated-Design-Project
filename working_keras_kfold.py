@@ -23,7 +23,11 @@ def extract_features_from_file(file_path, assigned_label, window_samples=100, st
     # Target spatial and physics channels
     features = ["Axial_x", "Axial_y", "Axial_z", "Acc_Magnitude", "Jerk_Magnitude"]
     for col in features:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            print(f"Warning: Missing column '{col}' in '{file_path}'. Skipping file.")
+            return np.empty((0, 6)), np.empty((0,))
     df = df.dropna(subset=features).reset_index(drop=True)
     
     windows_features = []
@@ -157,7 +161,7 @@ X_normal, y_normal = extract_from_folder(normal_dir,    assigned_label=0)
 X_falls,  y_falls  = extract_from_folder(fall_dir,      assigned_label=1)
 X_still,  y_still  = extract_from_folder(stillness_dir, assigned_label=2)
 
-# Ensure both files successfully generated data blocks before combining
+# Ensure files successfully generated data blocks before combining
 if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
     X = np.vstack([X_normal, X_falls, X_still])
     y = np.concatenate([y_normal, y_falls, y_still])
@@ -173,7 +177,6 @@ if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
     
     fold_f1_scores = []
     fold_auc_scores = []
-    best_auc = 0.0
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
         X_train_raw, X_val_raw = X[train_idx], X[val_idx]
@@ -222,11 +225,6 @@ if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
         print(f"Validation F1-Score : {f1:.4f}")
         print(f"Validation ROC-AUC  : {auc:.4f}\n")
 
-        if auc > best_auc:
-            best_auc = auc
-            header_file(model=model, scaler=scaler)  # Save scaler parameters for ESP32
-            print(f"--> Saved new best model from Fold {fold + 1} (AUC: {best_auc:.4f})")
-        
         oof_y_true.extend(y_val)
         oof_y_probs.append(y_pred_probs)
         fold_f1_scores.append(f1)
@@ -242,9 +240,35 @@ if len(X_normal) > 0 and len(X_falls) > 0 and len(X_still) > 0:
     # Plot ROC specifically for Class 1 (Fall Events) vs rest
     fall_true_binary = (oof_y_true == 1).astype(int)
     fall_probs = oof_y_probs[:, 1]
-    rec_threshold, _ = plot_oof_roc_curve(fall_true_binary, fall_probs, target_recall=0.95, figsize=(13, 7))
+    rec_threshold, _ = plot_oof_roc_curve(fall_true_binary, fall_probs, target_recall= 0.95, figsize = (13, 7))
 
     print(f"Recommended ESP32 Fall Trigger Threshold: {rec_threshold:.4f}")
 
+    # --- 7. FINAL PRODUCTION RETRAIN (100% DATA) ---
+    print("\n================ TRAINING FINAL PRODUCTION MODEL ================")
+    final_scaler = StandardScaler()
+    X_full_scaled = final_scaler.fit_transform(X)
+
+    prod_model = Sequential([
+        tf.keras.layers.Input(shape=(6,)), 
+        Dense(8, activation="relu"),
+        Dropout(0.2),
+        Dense(4, activation="relu"),
+        Dense(3, activation="softmax")
+    ])
+    prod_model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.003), 
+        loss='sparse_categorical_crossentropy', 
+        metrics=['accuracy']
+    )
+
+    full_classes = np.unique(y)
+    full_weights = compute_class_weight(class_weight='balanced', classes=full_classes, y=y)
+    full_weight_dict = dict(zip(full_classes, full_weights))
+
+    prod_model.fit(X_full_scaled, y, epochs=60, batch_size=16, verbose=0, class_weight=full_weight_dict)
+
+    header_file(model=prod_model, scaler=final_scaler)
+
 else:
-    print("\nExecution stopped: Ensure all three class folders contain valid CSV data.")
+    print("\nExecution stopped: Ensure all CSV data files exist and contain valid raw readings.")
